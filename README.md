@@ -592,6 +592,22 @@ class WritableStream {
 
     // Useful helpers
     get Promise<undefined> closed
+
+    // Internal methods
+    function [[drain]]()
+    function [[close]]()
+
+    // Internal properties
+    Array [[buffer]] = []
+    boolean [[closed]] = false
+    boolean [[errored]] = false
+    boolean [[isDraining]] = false
+    any [[error]]
+    function [[closeReaction]]
+    function [[write]]
+    function [[disposeReaction]]
+    Promise<undefined> [[writablePromise]]
+    Promise<undefined> [[closePromise]]
 }
 
 enum WritableStreamState {
@@ -602,3 +618,93 @@ enum WritableStreamState {
 }
 ```
 
+### Internal State of the BaseWritableStream
+
+#### `[[buffer]]`
+
+The `[[buffer]]` internal property accumulates incoming data that is not yet ready to be written because previous writes to the underlying sink have not yet indicated success. It consists of `(data, p)` tuples, where `data` is the data to be written, and `p` is a as-yet-pending promise to be fulfilled or rejected with the result of writing to the underlying sink.
+
+#### `[[drain]]()`, `[[isDraining]]`
+
+The `[[drain]]` internal method:
+
+1. Assert: `[[buffer]]` is not empty.
+1. Set `[[isDraining]]` to `true`.
+1. Shift `(data, p)` off of `[[buffer]]`.
+1. Let `writeP` be the result of casting `[[write]](data)` to a promise.
+1. When/if `writeP` is fulfilled,
+    1. Set `[[isDraining]]` to `false`.
+    1. Resolve `p` with `undefined`.
+    1. If `[[buffer]]` is not empty, call `[[drain]]()`.
+    1. If `[[buffer]]` is empty and `[[closed]]` is true, calls `[[close]]()`.
+1. When/if `writeP` is rejected with reason `r`, call `[[error]](r)`.
+
+`[[isDraining]]` is also consulted by the public `write` API to know whether it should initiate a `[[drain]]()` call or not.
+
+#### `[[error]](r)`, `[[error]]`, `[[errored]]`
+
+The `[[error]]` internal method:
+
+1. Set `[[errored]]` to `true`.
+1. Set `[[error]]` to `r`.
+1. For each `(data, p)` in `[[buffer]]`, reject `p` with `r`.
+1. Reject `[[writablePromise]]` with `r`.
+1. Reject `[[closePromise]]` with `r`.
+
+#### `[[close]]()`, `[[dispose]](r)`, `[[closedPromise]]`, `[[closed]]`
+
+The `[[closed]]` boolean tracks where a close has been requested via the public `close()` method. This does not necessarily trigger an immediate close, as there may be pending writes still to happen.
+
+The `[[close]]` internal method is called by `[[drain]]()` after the internal buffers are drained and `[[closed]]` is set. It performs the following steps:
+
+1. Calls `[[closeReaction]]` and casts the result to a promise `closeP`.
+1. Resolves `[[closedPromise]]` with `closeP`.
+1. When/if `closeP` is rejected with reason `r`, rejects `[[writablePromise]]` with `r`.
+1. When/if `closeP` is fulfilled, rejects `[[writablePromise]]` with an error indicating the stream is closed and will never again become writable.
+
+The `[[dispose]]` internal method is called in reaction to a public `
+
+#### `[[write]]`, `[[closeReaction]]`, `[[disposeReaction]]`
+
+These internal properties simply store the functions provide to the constructor for writing to, closing, or disposing of the underlying data sink.
+
+#### `[[writablePromise]]`
+
+This is simply the promise returned by the `waitForWritable()` public API. When the buffer is drained, it is fulfilled; when data is pushed onto the buffer or a write operation is ongoing, it is reset to a new pending promise so that subsequent calls to `waitForWritable()` know to wait.
+
+### Properties of the WritableStream prototype
+
+#### constructor({ write, close, dispose })
+
+The constructor is passed several functions, all optional and promise-returning:
+
+- `write(data)` should write data to the underlying sink, returning a promise to indicate success or failure.
+- `close()` should close the underlying sink gracefully, releasing any resources.
+- `dispose()` should also close the underlying sink, but also perform any necessary cleanup under the assumption that all data written so far is suspect. For example, if this stream represented a newly-created file, `dispose` might delete the file.
+
+1. Set `[[write]]` to `write`.
+1. Set `[[close]]` to `close`.
+1. Set `[[dispose]]` to `dispose`.
+
+- ISSUE: need something for writev!!
+
+#### get writableState
+
+1. If `[[errored]]` is `true`, return `"errored"`.
+1. If `[[buffer]]` is empty and `[[isDraining]]` is `false`,
+    1. If `[[closed]]` is `true`, return `"closed".
+    1. Return `"writable"`.
+1. Return `"waiting"`.
+
+#### write(data)
+
+1. If `[[errored]]` is `true`, return a promise rejected with `[[error]]`.
+1. If `[[closed]]` is `true`, return a promise rejected with an error. (ISSUE: specific type of error?)
+1. Let `p` be a newly-created promise.
+1. Push `(data, p)` into `[[buffer]]`.
+1. If `[[isDraining]]` is `false`, call `[[drain]]()`.
+1. Return `p`.
+
+#### waitForWritable()
+
+1. Return `[[writablePromise]]`

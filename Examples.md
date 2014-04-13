@@ -450,7 +450,7 @@ function read(handle) {
 }
 
 function close(handle) {
-  return new Promie(function (resolve, reject) {
+  return new Promise(function (resolve, reject) {
     handle.close(function (error) {
       if (error) reject(error);
       else resolve(void(0));
